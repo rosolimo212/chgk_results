@@ -50,6 +50,16 @@ def get_tourn_result(tourn_id):
     gt.columns=['team_id', 'name', 'diff_bonus', 'tourn_id', 'result']
     return gt
 
+# выдаёт результат относительно рейтинговых ожиданий команды на наборе турниров
+def get_team_results(tourns, team_id):  # тут toutns - это массив айдищников
+    rs=[]
+    for tourn_id in tourns:
+        rs.append(get_team_result(tourn_id, team_id))
+    res=pd.DataFrame(rs, columns=['res'])
+    res['tourn_id']=tourns
+    res['team_id']=team_id
+    return res
+
 # вытаскивае расплюсовку команды в данном турнире в ненормализованном виде
 def get_team(tourn_id, team_id):
     try:
@@ -524,6 +534,47 @@ def get_tourn_result(tourn_id):
     gt['result']=np.sign(gt['diff_bonus'])
     gt.columns=['team_id', 'name', 'diff_bonus', 'tourn_id', 'result']
     return gt
+
+def plmin(tourn):
+    res=pd.DataFrame()
+    for tourn_id in tourn:
+        df=get_tourn_result(tourn_id)
+        res=pd.concat([res, df])
+    g=res.groupby('result').agg({'team_id': lambda x: x.nunique()})
+    g=g.reset_index()
+    g['share']=g['team_id']/sum(g['team_id'])
+        
+    return str(round(100*g[g['result']==1]['share'].values[0],1))+'%'
+
+def team_cat_res(tourn):
+    rt=pd.DataFrame()
+    mt=pd.DataFrame()
+    for tourn_id in tourn:
+        try:
+            r=get_tourn_result(tourn_id)
+            m=tourn_mark(tourn_id)
+            rt=pd.concat([rt, r])
+            mt=pd.concat([mt, m])
+            print(tourn_id)
+        except Exception:
+            pass
+    mrg=rt.merge(mt, 'left', on='team_id')
+
+    g=mrg.groupby(['type', 'result']).agg({'team_id': lambda x: x.nunique()})
+    g=g.reset_index()
+
+    gg=g.groupby('type').sum()
+    gg=gg.reset_index()
+    gg.columns=['type', 'r', 'sum']
+
+    g=g.merge(gg, 'left', on='type')
+    g['share']=round(100*g['team_id']/g['sum'], 1)
+    g=g[g['result']==1][['type', 'team_id', 'share']]
+    g['share']=g['share'].astype('str')
+    g['share']=g['share']+'%'
+    g['avg']=plmin(tourn)
+    g['res']=np.where(g['share']>g['avg'],'better',np.where(g['share']<g['avg'],'worse',np.where(g['share']==g['avg'],'same','error')))
+    return g
 
 
 
