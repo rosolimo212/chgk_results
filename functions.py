@@ -1,3 +1,19 @@
+import pandas as pd
+import numpy as np
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+plt.rcParams['figure.figsize'] = (10, 8)
+
+from multiprocessing import Pool
+import time
+
+pd.set_option('display.max_rows', 1000)
+pd.set_option('display.max_columns', 5000)
+pd.set_option('display.max_colwidth', 1000)
+
+from sklearn.cluster import KMeans
+
 # функция возвращает данные по конкретному турниру
 # там дофига всего - команды, города, рейтинги, большинство в читаемом виде
 # но вот  повопросные нормально не достать
