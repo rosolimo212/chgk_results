@@ -17,3 +17,11 @@ def get_tourn(tourn_id):
             d=pd.DataFrame()
             # если нам ввели что-то неправильное, вернём пустой DataFrame
     return d
+
+# функция возвращает результат данной команды в данном турнире 
+# в формате +1-1+0 (сыграла "в плюс", "в минус" или "в ноль") с точки зрения рейтингового прогноза
+# зависит от get_tourn()
+def get_team_result(tourn_id, team_id):
+    gt=get_tourn(tourn_id)
+    bns=gt[gt['idteam']==team_id]['diff_bonus'].values[0]
+    return np.sign(bns)
