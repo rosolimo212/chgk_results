@@ -589,10 +589,14 @@ def parse_tourn(start, stop):
             try:
                 dfb=get_tourn(tourn_id)[['idteam', 'base_name', 'diff_bonus', 'position']]
                 dfb['tourn_id']=tourn_id
+                t=pd.read_json('http://rating.chgk.info/api/tournaments/'+str(tourn_id))
+                t=t[['date_start', 'date_end', 'idtournament', 'type_name']]
+                t.columns=['date_start', 'date_end', 'tourn_id', 'type_name']
+                dfb=dfb.merge(t, 'left', on='tourn_id')
                 df=pd.concat([df, dfb])
             except Exception:
                 pass    
-        df.columns=['team_id', 'base_name', 'diff_bonus', 'position', 'tourn_id']
+        df.columns=['team_id', 'base_name', 'diff_bonus', 'position', 'tourn_id', 'date_start', 'date_end', 'type_name']
         df=df.reset_index()
         df.to_json('parse_tourn/'+str(start)+'-'+str(stop)+'.json')
     return df
