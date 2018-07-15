@@ -579,18 +579,21 @@ def team_cat_res(tourn):
 
 def parse_tourn(start, stop):
     try:
-        df=df.read_json('parse_tourn/'+str(start)+'-'+str(stop)+'.json')
+        df=pd.read_json('parse_tourn/'+str(start)+'-'+str(stop)+'.json')
+        #print('load')
     except Exception: 
         df=pd.DataFrame()
+        #print('calculate')
         for tourn_id in range(start, stop):
             dfb=pd.DataFrame()
             try:
                 dfb=get_tourn(tourn_id)[['idteam', 'base_name', 'diff_bonus', 'position']]
                 dfb['tourn_id']=tourn_id
-                dfb.columns=['team_id', 'base_name', 'diff_bonus', 'position', 'tourn_id']
+                df=pd.concat([df, dfb])
             except Exception:
-                pass
-            df=pd.concat([df, dfb])
+                pass    
+        df.columns=['team_id', 'base_name', 'diff_bonus', 'position', 'tourn_id']
+        df=df.reset_index()
         df.to_json('parse_tourn/'+str(start)+'-'+str(stop)+'.json')
     return df
 
