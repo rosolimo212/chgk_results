@@ -139,11 +139,17 @@ def get_tourn_list(date_start: str, date_end: str, page: int):
     json_data = []
     for tdata in response.json():
         diff = 0
+        tdl = 0
         # для старых турниров иногда его нет
         try:
             diff = tdata['difficultyForecast']
         except:
             diff = 0
+        try:
+            tdl = tdata['trueDL']
+        except:
+            tdl = 0
+        
         json_data.append([
                             tdata['id'],
                             tdata['name'],
@@ -152,7 +158,8 @@ def get_tourn_list(date_start: str, date_end: str, page: int):
                             tdata['idseason'],
                             diff,
                             tdata['maiiRating'],
- 
+                            tdl,
+                            tdata['questionQty'],
                             ])
     torun_list_df = pd.DataFrame(json_data)
     torun_list_df.columns = [
@@ -161,7 +168,9 @@ def get_tourn_list(date_start: str, date_end: str, page: int):
                         'type',
                         'season',
                         'difficulty_forecast',
-                        'is_rating'
+                        'is_rating',
+                        'trueDL',     
+                        'questionQty',
                         ]
 
     return torun_list_df
