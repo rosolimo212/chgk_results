@@ -33,7 +33,7 @@ def get_tourn_result(tourn_id: int):
     }
 
     response = requests.get('https://api.rating.chgk.net/tournaments/' + str(tourn_id) + '/results', params=params, headers=headers)
-    print(response.status_code)
+    print("Status code: ", response.status_code)
 
     # вот в эти списки сохраняем данные по каждому объекту
     json_data = []
@@ -134,7 +134,10 @@ def get_tourn_list(date_start: str, date_end: str, page: int):
     }
 
     response = requests.get('https://api.rating.chgk.net/tournaments/', params=params, headers=headers)
-    print(response.status_code)
+    print("Status code: ", response.status_code)
+
+    if response.status_code != 200:
+        print("Error message: ", response.text)
 
     json_data = []
     for tdata in response.json():
