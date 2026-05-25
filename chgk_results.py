@@ -11,15 +11,18 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 from urllib.parse import urljoin
 
+import numpy as np
 import pandas as pd
 import requests
+from tqdm.auto import tqdm
 
 API_BASE = "https://api.rating.chgk.info"
 ITEMS_PER_PAGE = 500
 DEFAULT_WINDOW_DAYS = 30
 DEFAULT_WORKERS = 3
 DEFAULT_MAX_RETRIES = 5
-DEFAULT_TIMEOUT = 30
+DEFAULT_TIMEOUT = 60
+LIST_TIMEOUT = 120
 DEFAULT_REQUEST_DELAY = 0.1
 
 RESULTS_PARAMS = {
@@ -92,6 +95,18 @@ QUESTION_RESULT_COLUMNS = [
     "fetched_at",
 ]
 
+QUESTION_RESULT_ENRICHED_COLUMNS = QUESTION_RESULT_COLUMNS + [
+    "difficulty",
+    "mean_team_rating",
+    "take_probability",
+    "question_potential",
+]
+
+TEAM_PERFORMANCE_ENRICHED_COLUMNS = TEAM_PERFORMANCE_COLUMNS + [
+    "total_potential",
+    "potential",
+]
+
 INDEX_COLUMNS = [
     "tournament_id",
     "tournament_name",
@@ -117,6 +132,34 @@ _FAILURE_COLUMNS = [
 ]
 
 _write_lock = threading.Lock()
+_index_lock = threading.RLock()
+
+
+def _notify(show_progress: bool, message: str) -> None:
+    if show_progress:
+        tqdm.write(message)
+    else:
+        print(message)
+
+
+def _failure_count(stats: dict[str, int]) -> int:
+    return stats.get("failed", 0) + stats.get("results_failed", 0)
+
+
+def _progress_postfix(stats: dict[str, int]) -> dict[str, int]:
+    return {
+        "ok": stats.get("ok", 0),
+        "skip": stats.get("skipped", 0),
+        "fail": _failure_count(stats),
+    }
+
+
+def _print_download_summary(label: str, stats: dict[str, int]) -> None:
+    print(
+        f"{label}: total={stats.get('total', 0)}, "
+        f"ok={stats.get('ok', 0)}, skipped={stats.get('skipped', 0)}, "
+        f"failed={stats.get('failed', 0)}, results_failed={stats.get('results_failed', 0)}"
+    )
 
 
 def parse_iso_date(value: Any) -> Optional[str]:
@@ -518,12 +561,18 @@ def fetch_tournament_list_page(
     *,
     params: Optional[dict[str, Any]] = None,
     is_verbose: bool = False,
+    timeout: int = LIST_TIMEOUT,
 ) -> tuple[list[dict[str, Any]], Optional[str], Optional[int], str]:
     query = {"itemsPerPage": ITEMS_PER_PAGE, "page": page}
     if params:
         query.update(params)
     path = "tournaments.json"
-    data, error, status = api_request(path, params=query, is_verbose=is_verbose)
+    data, error, status = api_request(
+        path,
+        params=query,
+        is_verbose=is_verbose,
+        timeout=timeout,
+    )
     url = urljoin(API_BASE + "/", path)
     return _extract_collection(data), error, status, url
 
@@ -532,38 +581,58 @@ def iter_tournament_list(
     *,
     params: Optional[dict[str, Any]] = None,
     is_verbose: bool = False,
+    show_progress: bool = True,
+    progress_desc: str = "Tournament list",
     paths: Optional[dict[str, Path]] = None,
-) -> list[dict[str, Any]]:
-    """Download full tournament list with pagination."""
+) -> tuple[list[dict[str, Any]], bool]:
+    """Download tournament list with pagination.
+
+    Returns:
+        items and a flag indicating whether pagination finished without errors.
+    """
     tournaments: list[dict[str, Any]] = []
     page = 1
-    while True:
-        page_items, error, status, url = fetch_tournament_list_page(
-            page,
-            params=params,
-            is_verbose=is_verbose,
-        )
-        if error:
-            if paths is not None:
-                _log_list_page_failure(
-                    paths,
-                    page=page,
-                    url=url,
-                    status_code=status,
-                    error_message=error,
-                )
+    completed = True
+    page_bar = tqdm(
+        desc=progress_desc,
+        unit="page",
+        disable=not show_progress,
+        leave=False,
+    )
+    try:
+        while True:
+            page_items, error, status, url = fetch_tournament_list_page(
+                page,
+                params=params,
+                is_verbose=is_verbose,
+            )
+            if error:
+                completed = False
+                if paths is not None:
+                    _log_list_page_failure(
+                        paths,
+                        page=page,
+                        url=url,
+                        status_code=status,
+                        error_message=error,
+                    )
+                message = f"Tournament list stopped at page {page}: {error}"
+                if is_verbose or show_progress:
+                    _notify(show_progress, message)
+                break
+            if not page_items:
+                break
+            tournaments.extend(page_items)
+            page_bar.update(1)
+            page_bar.set_postfix(tournaments=len(tournaments), refresh=False)
             if is_verbose:
-                print(f"Stopped tournament list at page {page}: {error}")
-            break
-        if not page_items:
-            break
-        tournaments.extend(page_items)
-        if is_verbose:
-            print(f"Tournament list page {page}: {len(page_items)} items")
-        if len(page_items) < ITEMS_PER_PAGE:
-            break
-        page += 1
-    return tournaments
+                print(f"Tournament list page {page}: {len(page_items)} items")
+            if len(page_items) < ITEMS_PER_PAGE:
+                break
+            page += 1
+    finally:
+        page_bar.close()
+    return tournaments, completed
 
 
 def fetch_team_tournament_ids(
@@ -632,10 +701,16 @@ def fetch_tournament_bundle(
     return tournament, result_items, None
 
 
-def _write_shard(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> None:
+def _atomic_write_parquet(path: Path, frame: pd.DataFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    frame.to_parquet(tmp_path, index=False)
+    tmp_path.replace(path)
+
+
+def _write_shard(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> None:
     frame = pd.DataFrame(rows, columns=columns)
-    frame.to_parquet(path, index=False)
+    _atomic_write_parquet(path, frame)
 
 
 def _write_tournament_tables(
@@ -662,15 +737,36 @@ def _write_tournament_tables(
     )
 
 
-def _load_index(paths: dict[str, Path]) -> pd.DataFrame:
-    if not paths["tournaments_index"].exists():
+def _load_index_unlocked(paths: dict[str, Path]) -> pd.DataFrame:
+    index_path = paths["tournaments_index"]
+    if not index_path.exists():
         return pd.DataFrame(columns=INDEX_COLUMNS)
-    return pd.read_parquet(paths["tournaments_index"])
+    try:
+        return pd.read_parquet(index_path)
+    except Exception as exc:
+        corrupt_path = index_path.with_suffix(".parquet.corrupt")
+        index_path.replace(corrupt_path)
+        _notify(
+            True,
+            f"Warning: tournaments_index.parquet was corrupt ({exc}); "
+            f"renamed to {corrupt_path.name}",
+        )
+        return pd.DataFrame(columns=INDEX_COLUMNS)
+
+
+def _load_index(paths: dict[str, Path]) -> pd.DataFrame:
+    with _index_lock:
+        return _load_index_unlocked(paths)
+
+
+def _save_index_unlocked(paths: dict[str, Path], index: pd.DataFrame) -> None:
+    paths["state"].mkdir(parents=True, exist_ok=True)
+    _atomic_write_parquet(paths["tournaments_index"], index)
 
 
 def _save_index(paths: dict[str, Path], index: pd.DataFrame) -> None:
-    paths["state"].mkdir(parents=True, exist_ok=True)
-    index.to_parquet(paths["tournaments_index"], index=False)
+    with _index_lock:
+        _save_index_unlocked(paths, index)
 
 
 def _upsert_index_row(
@@ -731,10 +827,81 @@ def _update_index_row(
     paths: dict[str, Path],
     row: dict[str, Any],
 ) -> None:
-    with _write_lock:
-        index = _load_index(paths)
+    with _index_lock:
+        index = _load_index_unlocked(paths)
         index = _upsert_index_row(index, row)
-        _save_index(paths, index)
+        _save_index_unlocked(paths, index)
+
+
+def _merge_tournament_index(
+    list_index: pd.DataFrame,
+    existing_index: pd.DataFrame,
+    *,
+    resume: bool,
+) -> pd.DataFrame:
+    if list_index.empty:
+        return existing_index
+    if existing_index.empty or not resume:
+        return list_index
+    listed_ids = set(list_index["tournament_id"].tolist())
+    preserved = existing_index[~existing_index["tournament_id"].isin(listed_ids)]
+    return pd.concat([preserved, list_index], ignore_index=True)
+
+
+def _tournament_ids_from_shards(paths: dict[str, Path]) -> list[int]:
+    tournament_ids: list[int] = []
+    for shard_path in paths["team_shards"].glob("*.parquet"):
+        try:
+            tournament_ids.append(int(shard_path.stem))
+        except ValueError:
+            continue
+    return sorted(set(tournament_ids))
+
+
+def _resolve_tournament_ids_for_download(
+    list_items: list[dict[str, Any]],
+    list_complete: bool,
+    paths: dict[str, Path],
+    *,
+    show_progress: bool,
+) -> tuple[list[int], pd.DataFrame, bool]:
+    existing_index = _load_index(paths)
+
+    if list_items:
+        list_index = _index_from_list_items(list_items)
+        return (
+            list_index["tournament_id"].dropna().astype(int).tolist(),
+            list_index,
+            list_complete,
+        )
+
+    if not existing_index.empty:
+        _notify(
+            show_progress,
+            "Tournament list fetch returned 0 items; using cached tournaments_index "
+            f"({len(existing_index)} tournaments).",
+        )
+        return (
+            existing_index["tournament_id"].dropna().astype(int).tolist(),
+            existing_index,
+            False,
+        )
+
+    shard_ids = _tournament_ids_from_shards(paths)
+    if shard_ids:
+        _notify(
+            show_progress,
+            "Tournament list fetch returned 0 items; using existing shard files "
+            f"({len(shard_ids)} tournaments).",
+        )
+        return shard_ids, pd.DataFrame(columns=INDEX_COLUMNS), False
+
+    _notify(
+        show_progress,
+        "Tournament list fetch returned 0 items and no cached index was found. "
+        "See data/failures/list_pages_failed.csv",
+    )
+    return [], pd.DataFrame(columns=INDEX_COLUMNS), False
 
 
 def download_tournament(
@@ -813,8 +980,10 @@ def _download_many_tournaments(
     paths: dict[str, Path],
     *,
     is_verbose: bool = False,
+    show_progress: bool = True,
     resume: bool = True,
     workers: int = DEFAULT_WORKERS,
+    progress_desc: str = "Tournaments",
 ) -> dict[str, int]:
     ids = sorted(set(int(tournament_id) for tournament_id in tournament_ids))
     stats = {"total": len(ids), "ok": 0, "skipped": 0, "failed": 0, "results_failed": 0}
@@ -830,33 +999,48 @@ def _download_many_tournaments(
         )
         return tournament_id, status
 
-    if workers <= 1:
-        for tournament_id in ids:
-            _, status = _worker(tournament_id)
-            stats[status] = stats.get(status, 0) + 1
-            if is_verbose:
-                print(f"Tournament {tournament_id}: {status}")
-        return stats
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_worker, tournament_id): tournament_id for tournament_id in ids}
-        for future in as_completed(futures):
-            tournament_id = futures[future]
-            try:
-                _, status = future.result()
-            except Exception as exc:
-                _log_failure(
-                    paths,
-                    entity_type="tournament",
-                    entity_id=tournament_id,
-                    url=f"{API_BASE}/tournaments/{tournament_id}.json",
-                    status_code=None,
-                    error_message=str(exc),
-                )
-                status = "failed"
-            stats[status] = stats.get(status, 0) + 1
-            if is_verbose:
-                print(f"Tournament {tournament_id}: {status}")
+    progress = tqdm(
+        total=len(ids),
+        desc=progress_desc,
+        unit="tournament",
+        disable=not show_progress,
+    )
+    try:
+        if workers <= 1:
+            for tournament_id in ids:
+                _, status = _worker(tournament_id)
+                stats[status] = stats.get(status, 0) + 1
+                progress.set_postfix(_progress_postfix(stats), refresh=False)
+                progress.update(1)
+                if is_verbose:
+                    print(f"Tournament {tournament_id}: {status}")
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = {
+                    executor.submit(_worker, tournament_id): tournament_id
+                    for tournament_id in ids
+                }
+                for future in as_completed(futures):
+                    tournament_id = futures[future]
+                    try:
+                        _, status = future.result()
+                    except Exception as exc:
+                        _log_failure(
+                            paths,
+                            entity_type="tournament",
+                            entity_id=tournament_id,
+                            url=f"{API_BASE}/tournaments/{tournament_id}.json",
+                            status_code=None,
+                            error_message=str(exc),
+                        )
+                        status = "failed"
+                    stats[status] = stats.get(status, 0) + 1
+                    progress.set_postfix(_progress_postfix(stats), refresh=False)
+                    progress.update(1)
+                    if is_verbose:
+                        print(f"Tournament {tournament_id}: {status}")
+    finally:
+        progress.close()
 
     return stats
 
@@ -888,31 +1072,59 @@ def download_all(
     data_dir: str | Path,
     *,
     is_verbose: bool = False,
+    show_progress: bool = True,
     resume: bool = True,
     workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
     """Download all tournaments and write parquet shards."""
     paths = _ensure_layout(data_dir)
-    list_items = iter_tournament_list(is_verbose=is_verbose, paths=paths)
-    list_index = _index_from_list_items(list_items)
+    list_items, list_complete = iter_tournament_list(
+        is_verbose=is_verbose,
+        show_progress=show_progress,
+        progress_desc="Tournament list",
+        paths=paths,
+    )
+    tournament_ids, list_index, list_complete = _resolve_tournament_ids_for_download(
+        list_items,
+        list_complete,
+        paths,
+        show_progress=show_progress,
+    )
+
+    if not tournament_ids:
+        stats = {
+            "total": 0,
+            "ok": 0,
+            "skipped": 0,
+            "failed": 0,
+            "results_failed": 0,
+            "list_fetch_failed": True,
+        }
+        if is_verbose or show_progress:
+            _print_download_summary("download_all finished", stats)
+        return stats
 
     existing_index = _load_index(paths)
-    if not existing_index.empty and resume:
-        listed_ids = set(list_index["tournament_id"].tolist())
-        preserved = existing_index[~existing_index["tournament_id"].isin(listed_ids)]
-        index = pd.concat([preserved, list_index], ignore_index=True)
-    else:
-        index = list_index
+    index = _merge_tournament_index(list_index, existing_index, resume=resume)
     _save_index(paths, index)
 
-    tournament_ids = list_index["tournament_id"].dropna().astype(int).tolist()
+    if not list_complete and show_progress:
+        _notify(
+            show_progress,
+            f"Continuing download for {len(tournament_ids)} tournaments "
+            "(partial or cached tournament list).",
+        )
+
     stats = _download_many_tournaments(
         tournament_ids,
         paths,
         is_verbose=is_verbose,
+        show_progress=show_progress,
         resume=resume,
         workers=workers,
+        progress_desc="Download all",
     )
+    stats["list_fetch_failed"] = not list_complete
 
     state = _load_sync_state(paths)
     state.update(
@@ -923,8 +1135,8 @@ def download_all(
         }
     )
     _save_sync_state(paths, state)
-    if is_verbose:
-        print(f"download_all finished: {stats}")
+    if is_verbose or show_progress:
+        _print_download_summary("download_all finished", stats)
     return stats
 
 
@@ -972,6 +1184,7 @@ def update_by_window(
     window_days: int = DEFAULT_WINDOW_DAYS,
     *,
     is_verbose: bool = False,
+    show_progress: bool = True,
     resume: bool = False,
     workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
@@ -981,43 +1194,51 @@ def update_by_window(
     last_sync_at = state.get("last_success_at")
 
     recent_end = (_today() - timedelta(days=window_days)).isoformat()
-    recent_items = iter_tournament_list(
+    recent_items, recent_complete = iter_tournament_list(
         params={"dateEnd[after]": recent_end},
         is_verbose=is_verbose,
+        show_progress=show_progress,
+        progress_desc="Tournament list (recent)",
         paths=paths,
     )
 
     changed_items: list[dict[str, Any]] = []
+    changed_complete = True
     if last_sync_at:
-        changed_items = iter_tournament_list(
+        changed_items, changed_complete = iter_tournament_list(
             params={"lastEditDate[after]": parse_iso_date(last_sync_at)},
             is_verbose=is_verbose,
+            show_progress=show_progress,
+            progress_desc="Tournament list (changed)",
             paths=paths,
         )
 
     combined = {item["id"]: item for item in recent_items + changed_items if item.get("id") is not None}
+    list_complete = recent_complete and changed_complete
     list_index = _index_from_list_items(list(combined.values()))
 
     existing_index = _load_index(paths)
-    if not existing_index.empty:
-        listed_ids = set(list_index["tournament_id"].tolist())
-        preserved = existing_index[~existing_index["tournament_id"].isin(listed_ids)]
-        index = pd.concat([preserved, list_index], ignore_index=True)
-    else:
-        index = list_index
+    index = _merge_tournament_index(list_index, existing_index, resume=True)
     _save_index(paths, index)
+
+    if list_index.empty and not existing_index.empty:
+        list_index = existing_index
 
     tournament_ids = select_tournament_ids_for_window(
         list_index,
         window_days=window_days,
         last_sync_at=last_sync_at,
     )
+    if not tournament_ids and not list_complete and show_progress:
+        _notify(show_progress, "Window update found 0 tournaments after list fetch problems.")
     stats = _download_many_tournaments(
         tournament_ids,
         paths,
         is_verbose=is_verbose,
+        show_progress=show_progress,
         resume=resume,
         workers=workers,
+        progress_desc="Update window",
     )
 
     state.update(
@@ -1029,8 +1250,8 @@ def update_by_window(
         }
     )
     _save_sync_state(paths, state)
-    if is_verbose:
-        print(f"update_by_window finished: {stats}")
+    if is_verbose or show_progress:
+        _print_download_summary("update_by_window finished", stats)
     return stats
 
 
@@ -1039,23 +1260,35 @@ def download_teams(
     team_ids: Iterable[int],
     *,
     is_verbose: bool = False,
+    show_progress: bool = True,
     resume: bool = True,
     workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
     """Download full tournaments for all tournaments where given teams played."""
     paths = _ensure_layout(data_dir)
     tournament_ids: set[int] = set()
-    for team_id in team_ids:
+    team_id_list = [int(team_id) for team_id in team_ids]
+    team_bar = tqdm(
+        team_id_list,
+        desc="Team tournament lists",
+        unit="team",
+        disable=not show_progress,
+        leave=False,
+    )
+    for team_id in team_bar:
         tournament_ids.update(
-            fetch_team_tournament_ids(int(team_id), is_verbose=is_verbose, paths=paths)
+            fetch_team_tournament_ids(team_id, is_verbose=is_verbose, paths=paths)
         )
+        team_bar.set_postfix(tournaments=len(tournament_ids), refresh=False)
 
     stats = _download_many_tournaments(
         tournament_ids,
         paths,
         is_verbose=is_verbose,
+        show_progress=show_progress,
         resume=resume,
         workers=workers,
+        progress_desc="Download teams",
     )
 
     state = _load_sync_state(paths)
@@ -1063,13 +1296,13 @@ def download_teams(
         {
             "last_success_at": _utc_now_iso(),
             "mode": "download_teams",
-            "team_ids": [int(team_id) for team_id in team_ids],
+            "team_ids": team_id_list,
             "stats": stats,
         }
     )
     _save_sync_state(paths, state)
-    if is_verbose:
-        print(f"download_teams finished: {stats}")
+    if is_verbose or show_progress:
+        _print_download_summary("download_teams finished", stats)
     return stats
 
 
@@ -1077,6 +1310,7 @@ def retry_failures(
     data_dir: str | Path,
     *,
     is_verbose: bool = False,
+    show_progress: bool = True,
     workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
     """Retry tournament downloads listed in fetch_failures.csv."""
@@ -1094,11 +1328,13 @@ def retry_failures(
         tournament_ids,
         paths,
         is_verbose=is_verbose,
+        show_progress=show_progress,
         resume=False,
         workers=workers,
+        progress_desc="Retry failures",
     )
-    if is_verbose:
-        print(f"retry_failures finished: {stats}")
+    if is_verbose or show_progress:
+        _print_download_summary("retry_failures finished", stats)
     return stats
 
 
@@ -1156,6 +1392,147 @@ def compact_tables(data_dir: str | Path) -> tuple[pd.DataFrame, pd.DataFrame, pd
     question_df.to_parquet(paths["tables"] / "question_results.parquet", index=False)
 
     return team_df, player_df, question_df
+
+
+def clip_take_probability(values: pd.Series) -> pd.Series:
+    """Clip predicted take probability to (0, 1) like in epics.py."""
+    clipped = values.copy()
+    clipped = clipped.where(clipped < 1, 0.99)
+    clipped = clipped.where(clipped > 0, 0.01)
+    return clipped
+
+
+def compute_question_difficulty(question_df: pd.DataFrame) -> pd.DataFrame:
+    """Question difficulty as the share of teams that took the question."""
+    stats = (
+        question_df.groupby(["tournament_id", "question_number"], as_index=False)
+        .agg(
+            difficulty=("taken", "mean"),
+            teams_count=("taken", "count"),
+        )
+    )
+    return stats
+
+
+def enrich_question_results(
+    question_df: pd.DataFrame,
+    team_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Add difficulty, take_probability and question_potential to question rows."""
+    if question_df.empty:
+        return pd.DataFrame(columns=QUESTION_RESULT_ENRICHED_COLUMNS)
+
+    team_ratings = team_df[["tournament_id", "team_id", "rg"]].drop_duplicates()
+    enriched = question_df.merge(team_ratings, on=["tournament_id", "team_id"], how="left")
+
+    question_stats = compute_question_difficulty(enriched)
+    rating_stats = (
+        enriched.groupby(["tournament_id", "question_number"], as_index=False)
+        .agg(mean_team_rating=("rg", "mean"))
+    )
+    question_stats = question_stats.merge(
+        rating_stats,
+        on=["tournament_id", "question_number"],
+        how="left",
+    )
+
+    enriched = enriched.merge(
+        question_stats[
+            ["tournament_id", "question_number", "difficulty", "mean_team_rating"]
+        ],
+        on=["tournament_id", "question_number"],
+        how="left",
+    )
+
+    rating_factor = enriched["rg"] / enriched["mean_team_rating"]
+    rating_factor = rating_factor.where(enriched["mean_team_rating"].notna() & (enriched["mean_team_rating"] != 0))
+    enriched["take_probability"] = clip_take_probability(enriched["difficulty"] * rating_factor)
+    enriched["question_potential"] = enriched["difficulty"] * enriched["taken"]
+
+    return enriched[QUESTION_RESULT_ENRICHED_COLUMNS]
+
+
+def enrich_team_performances(
+    team_df: pd.DataFrame,
+    question_enriched_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Add total_potential and potential to team tournament rows."""
+    if team_df.empty:
+        return pd.DataFrame(columns=TEAM_PERFORMANCE_ENRICHED_COLUMNS)
+
+    team_potential = (
+        question_enriched_df.groupby(["tournament_id", "team_id"], as_index=False)
+        .agg(total_potential=("question_potential", "sum"))
+    )
+    enriched = team_df.merge(team_potential, on=["tournament_id", "team_id"], how="left")
+    enriched["total_potential"] = enriched["total_potential"].fillna(0.0)
+
+    questions_total = pd.to_numeric(enriched["questions_total"], errors="coerce")
+    enriched["potential"] = np.where(
+        questions_total > 0,
+        enriched["total_potential"] / questions_total,
+        np.nan,
+    )
+
+    return enriched[TEAM_PERFORMANCE_ENRICHED_COLUMNS]
+
+
+def load_table_data(
+    data_dir: str | Path,
+    *,
+    reload_from_shards: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load team, player and question tables from parquet shards or compact files."""
+    paths = _ensure_layout(data_dir)
+    compact_team = paths["tables"] / "team_performances.parquet"
+    compact_question = paths["tables"] / "question_results.parquet"
+
+    if reload_from_shards or not compact_team.exists() or not compact_question.exists():
+        return compact_tables(data_dir)
+
+    player_path = paths["tables"] / "player_performances.parquet"
+    player_df = pd.read_parquet(player_path) if player_path.exists() else _empty_table(PLAYER_PERFORMANCE_COLUMNS)
+    return (
+        pd.read_parquet(compact_team),
+        player_df,
+        pd.read_parquet(compact_question),
+    )
+
+
+def process_downloaded_data(
+    data_dir: str | Path,
+    *,
+    is_verbose: bool = False,
+    reload_from_shards: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compute difficulty, probabilities and potential metrics for downloaded data.
+
+    Returns:
+        team_performances and question_results DataFrames with enrichment columns.
+    """
+    paths = _ensure_layout(data_dir)
+    team_df, _, question_df = load_table_data(
+        data_dir,
+        reload_from_shards=reload_from_shards,
+    )
+
+    if is_verbose:
+        print(f"Processing {len(team_df)} team rows and {len(question_df)} question rows")
+
+    question_enriched = enrich_question_results(question_df, team_df)
+    team_enriched = enrich_team_performances(team_df, question_enriched)
+
+    team_enriched.to_parquet(paths["tables"] / "team_performances_enriched.parquet", index=False)
+    question_enriched.to_parquet(paths["tables"] / "question_results_enriched.parquet", index=False)
+
+    if is_verbose:
+        print(
+            "Saved enriched tables:",
+            paths["tables"] / "team_performances_enriched.parquet",
+            paths["tables"] / "question_results_enriched.parquet",
+        )
+
+    return team_enriched, question_enriched
 
 
 def get_sync_stats(data_dir: str | Path) -> dict[str, Any]:
@@ -1253,6 +1630,28 @@ def run_self_tests() -> None:
         last_sync_at="2025-05-09T00:00:00+00:00",
     )
     assert selected == {1}
+
+    question_df = pd.DataFrame(
+        [
+            {"tournament_id": 1, "team_id": 10, "question_number": 1, "mask_char": "1", "taken": 1, "fetched_at": "t"},
+            {"tournament_id": 1, "team_id": 10, "question_number": 2, "mask_char": "0", "taken": 0, "fetched_at": "t"},
+            {"tournament_id": 1, "team_id": 20, "question_number": 1, "mask_char": "0", "taken": 0, "fetched_at": "t"},
+            {"tournament_id": 1, "team_id": 20, "question_number": 2, "mask_char": "1", "taken": 1, "fetched_at": "t"},
+        ]
+    )
+    team_df = pd.DataFrame(
+        [
+            {"tournament_id": 1, "team_id": 10, "rg": 8000},
+            {"tournament_id": 1, "team_id": 20, "rg": 6000},
+        ]
+    )
+    question_enriched = enrich_question_results(question_df, team_df)
+    assert question_enriched.loc[question_enriched["question_number"] == 1, "difficulty"].iloc[0] == 0.5
+    probability = question_enriched.loc[
+        (question_enriched["team_id"] == 10) & (question_enriched["question_number"] == 1),
+        "take_probability",
+    ].iloc[0]
+    assert abs(probability - (8000 / 7000 * 0.5)) < 1e-9
 
 
 if __name__ == "__main__":
