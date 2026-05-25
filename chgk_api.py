@@ -53,6 +53,20 @@ def get_tourn_result(tourn_id: int):
             venue = ''
             is_sinh = 0
         try:
+            in_rating =fixt['rating']['inRating']
+            rg = fixt['rating']['rg']
+            # бонус за турнир
+            d = fixt['rating']['d']
+            pered_pos = fixt['rating']['predictedPosition'] 
+            b = fixt['rating']['b']
+        except:
+            in_rating = 0
+            rg = 0
+            d = 0
+            pered_pos = 0
+            b = 0
+
+        try:
             json_data.append([
                                 tourn_id,
                                 fixt['team']['id'],
@@ -63,30 +77,38 @@ def get_tourn_result(tourn_id: int):
                                 fixt['questionsTotal'],
                                 is_sinh,
                                 venue,
-                                fixt['rating']['inRating'],
-                                fixt['rating']['rg'],
+                                in_rating,
+                                rg,
                                 # бонус за турнир
-                                fixt['rating']['d'],
-                                fixt['rating']['predictedPosition'],
+                                d,
+                                pered_pos,
+                                b,
                                 ])
-            mask_data.append([
-                            tourn_id,
-                            fixt['team']['id'],
-                            # строка вида 10X? где каждый символ означает вопрос, взятый, невзятый, снятый или непонятный
-                            fixt['mask']
-                            ])
-            for player in fixt['teamMembers']:
-                players_data.append([
+            try:
+                mask_data.append([
                                 tourn_id,
                                 fixt['team']['id'],
-                                player['player']['id'],
-                                player['player']['surname'],
-                                player['player']['name'],
-                                # капитан, игрок базы или легионер
-                                player['flag'],
-                                # рейтинг игрока
-                                player['rating'],
+                                # строка вида 10X? где каждый символ означает вопрос, взятый, невзятый, снятый или непонятный
+                                fixt['mask']
                                 ])
+            except:
+                pass
+
+            try:
+                for player in fixt['teamMembers']:
+                    players_data.append([
+                                    tourn_id,
+                                    fixt['team']['id'],
+                                    player['player']['id'],
+                                    player['player']['surname'],
+                                    player['player']['name'],
+                                    # капитан, игрок базы или легионер
+                                    player['flag'],
+                                    # рейтинг игрока
+                                    player['rating'],
+                                    ])
+            except:
+                pass
         except:
             pass
         i = i + 1
@@ -95,7 +117,7 @@ def get_tourn_result(tourn_id: int):
     torun_df.columns = [
         'tourn_id', 'team_id', 'team_name', 'position', 'result',
         'is_sinh', 'venue', 
-        'is_rating', 'rg', 'd', 'predictedPosition'
+        'is_rating', 'rg', 'd', 'predictedPosition', 'b'
                         ]
     
 
@@ -127,7 +149,7 @@ def get_tourn_list(date_start: str, date_end: str, page: int):
     }
 
     params = {
-        'dateStart[after]': date_start,
+        'dateEnd[after]': date_start,
         'dateEnd[before]': date_end,
         'itemsPerPage': 500,
         'page': page
@@ -152,10 +174,19 @@ def get_tourn_list(date_start: str, date_end: str, page: int):
             tdl = tdata['trueDL']
         except:
             tdl = 0
-        
+
+        editors_lst = []
+        for editor in tdata['editors']:
+            editors_lst.append(editor['id'])
+        orgs_lst = []
+        for org in tdata['orgcommittee']:
+            orgs_lst.append(org['id'])
+
         json_data.append([
                             tdata['id'],
                             tdata['name'],
+                            tdata['dateStart'],
+                            tdata['dateEnd'],
                             # очный, синхрон, онлайн или всякие асинхроны
                             tdata['type']['name'],
                             tdata['idseason'],
@@ -163,17 +194,23 @@ def get_tourn_list(date_start: str, date_end: str, page: int):
                             tdata['maiiRating'],
                             tdl,
                             tdata['questionQty'],
+                            editors_lst,
+                            orgs_lst,
                             ])
     torun_list_df = pd.DataFrame(json_data)
     torun_list_df.columns = [
                         'tourn_id',
                         'tourn_name',
+                        'date_start',
+                        'date_end',
                         'type',
                         'season',
                         'difficulty_forecast',
                         'is_rating',
                         'trueDL',     
                         'questionQty',
+                        'editors',
+                        'orgs',
                         ]
 
     return torun_list_df
