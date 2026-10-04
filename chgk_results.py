@@ -1,4 +1,11 @@
-"""Download and update sport ChGK tournament data from rating.chgk.info API."""
+"""Download and update sport ChGK tournament data from rating.chgk.info API.
+
+Human docs: readme.md. Agent context: agents.md. Backlog: task.md.
+
+Storage model: per-tournament parquet shards under data/, plus a tournaments
+index and sync_state.json. Prefer update_by_window for routine sync and
+download_all only as a rare full rebuild.
+"""
 
 from __future__ import annotations
 
@@ -16,20 +23,30 @@ import pandas as pd
 import requests
 from tqdm.auto import tqdm
 
+# ---------------------------------------------------------------------------
+# API / runtime defaults
+# ---------------------------------------------------------------------------
+
+# .info and .net are aliases of the same API; .info is the canonical base.
 API_BASE = "https://api.rating.chgk.info"
-ITEMS_PER_PAGE = 500
-DEFAULT_WINDOW_DAYS = 30
+ITEMS_PER_PAGE = 500  # API max is typically 512
+DEFAULT_WINDOW_DAYS = 30  # synch appeals can move results for ~a month
 DEFAULT_WORKERS = 3
 DEFAULT_MAX_RETRIES = 5
 DEFAULT_TIMEOUT = 60
 LIST_TIMEOUT = 120
 DEFAULT_REQUEST_DELAY = 0.1
 
+# includeTeamFlags is intentionally listed in task.md: without it API omits flags.
 RESULTS_PARAMS = {
     "includeTeamMembers": "1",
     "includeMasksAndControversials": "1",
     "includeRatingB": "1",
 }
+
+# ---------------------------------------------------------------------------
+# Table schemas (column order is the on-disk contract)
+# ---------------------------------------------------------------------------
 
 TEAM_PERFORMANCE_COLUMNS = [
     "tournament_id",
@@ -131,11 +148,18 @@ _FAILURE_COLUMNS = [
     "error_message",
 ]
 
+# Failures CSV appends and index parquet rewrites are shared across workers.
 _write_lock = threading.Lock()
 _index_lock = threading.RLock()
 
 
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+
 def _notify(show_progress: bool, message: str) -> None:
+    """Write a message without breaking active tqdm bars when possible."""
     if show_progress:
         tqdm.write(message)
     else:
@@ -162,6 +186,11 @@ def _print_download_summary(label: str, stats: dict[str, int]) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Parsers and row flatteners
+# ---------------------------------------------------------------------------
+
+
 def parse_iso_date(value: Any) -> Optional[str]:
     """Convert API datetime string to yyyy-mm-dd."""
     if value is None or value == "":
@@ -173,7 +202,11 @@ def parse_iso_date(value: Any) -> Optional[str]:
 
 
 def parse_mask(mask: Optional[str]) -> list[tuple[int, str, int]]:
-    """Expand result mask into per-question rows."""
+    """Expand result mask into (question_number, mask_char, taken) rows.
+
+    Only character ``1`` counts as taken. Other symbols (``0``, ``?``, ``X``, …)
+    are kept in ``mask_char`` with ``taken=0``.
+    """
     if not mask:
         return []
     rows: list[tuple[int, str, int]] = []
@@ -184,6 +217,7 @@ def parse_mask(mask: Optional[str]) -> list[tuple[int, str, int]]:
 
 
 def _player_ids(players: Any) -> str:
+    """Join player/editor ids as a comma-separated string."""
     if not players:
         return ""
     ids: list[str] = []
@@ -194,6 +228,7 @@ def _player_ids(players: Any) -> str:
 
 
 def _serialize_value(value: Any) -> str:
+    """Serialize nested API values into a stable flat string for parquet/csv."""
     if value is None:
         return ""
     if isinstance(value, list):
@@ -212,13 +247,6 @@ def _serialize_value(value: Any) -> str:
     if isinstance(value, dict):
         return json.dumps(value, ensure_ascii=False)
     return str(value)
-    if not players:
-        return ""
-    ids: list[str] = []
-    for player in players:
-        if isinstance(player, dict) and player.get("id") is not None:
-            ids.append(str(player["id"]))
-    return ",".join(ids)
 
 
 def _rating_systems_text(value: Any) -> str:
@@ -230,6 +258,7 @@ def _rating_systems_text(value: Any) -> str:
 
 
 def _has_chgk_rating(rating_systems: Any) -> bool:
+    """True when tournament participates in rating.chgk.gg (`chgkgg`)."""
     systems = rating_systems or []
     if isinstance(systems, str):
         systems = [part.strip() for part in systems.split(",") if part.strip()]
@@ -237,7 +266,7 @@ def _has_chgk_rating(rating_systems: Any) -> bool:
 
 
 def flatten_tournament_meta(tournament: dict[str, Any]) -> dict[str, Any]:
-    """Extract tournament-level fields used in team_performances."""
+    """Extract tournament-level fields used in team_performances / index."""
     tournament_type = tournament.get("type") or {}
     rating_systems = tournament.get("ratingSystems")
     return {
@@ -264,6 +293,7 @@ def _team_played_date(
     result: dict[str, Any],
     tournament_meta: dict[str, Any],
 ) -> Optional[str]:
+    """Prefer synch request dateStart; fall back to tournament date_start."""
     synch_request = result.get("synchRequest") or {}
     if synch_request.get("dateStart"):
         return parse_iso_date(synch_request["dateStart"])
@@ -277,7 +307,7 @@ def flatten_team_result(
     teams_count: int,
     fetched_at: str,
 ) -> dict[str, Any]:
-    """Build one team_performances row."""
+    """Build one team_performances row from tournament meta + one result item."""
     team = result.get("team") or {}
     current = result.get("current") or {}
     rating = result.get("rating") or {}
@@ -323,6 +353,7 @@ def flatten_player_results(
     *,
     fetched_at: str,
 ) -> list[dict[str, Any]]:
+    """Build player_performances rows for one team result."""
     rows: list[dict[str, Any]] = []
     team_id = (result.get("team") or {}).get("id")
     for member in result.get("teamMembers") or []:
@@ -349,6 +380,7 @@ def flatten_question_results(
     *,
     fetched_at: str,
 ) -> list[dict[str, Any]]:
+    """Build question_results rows from a team's mask."""
     rows: list[dict[str, Any]] = []
     team_id = (result.get("team") or {}).get("id")
     for question_number, mask_char, taken in parse_mask(result.get("mask")):
@@ -408,7 +440,13 @@ def _today() -> date:
     return datetime.now(timezone.utc).date()
 
 
+# ---------------------------------------------------------------------------
+# Local layout, failures, sync state
+# ---------------------------------------------------------------------------
+
+
 def _data_paths(data_dir: str | Path) -> dict[str, Path]:
+    """Map logical storage names to paths under data_dir."""
     root = Path(data_dir)
     return {
         "root": root,
@@ -507,6 +545,7 @@ def _log_list_page_failure(
 
 
 def _extract_collection(payload: Any) -> list[Any]:
+    """Normalize list / Hydra collection payloads to a plain Python list."""
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict):
@@ -515,6 +554,11 @@ def _extract_collection(payload: Any) -> list[Any]:
         if "hydra:member" in payload:
             return payload["hydra:member"]
     return []
+
+
+# ---------------------------------------------------------------------------
+# HTTP / API fetch
+# ---------------------------------------------------------------------------
 
 
 def api_request(
@@ -526,7 +570,7 @@ def api_request(
     timeout: int = DEFAULT_TIMEOUT,
     request_delay: float = DEFAULT_REQUEST_DELAY,
 ) -> tuple[Optional[Any], Optional[str], Optional[int]]:
-    """Perform GET request with retries. Returns (data, error, status_code)."""
+    """GET JSON with retries. Returns ``(data, error, status_code)``."""
     url = urljoin(API_BASE + "/", path.lstrip("/"))
     headers = {"accept": "application/json"}
     last_error: Optional[str] = None
@@ -641,6 +685,11 @@ def fetch_team_tournament_ids(
     is_verbose: bool = False,
     paths: Optional[dict[str, Path]] = None,
 ) -> set[int]:
+    """Return tournament ids where the team played.
+
+    OpenAPI documents this endpoint as a non-paginated array; the page loop
+    remains as a defensive fallback if the server still chunks large histories.
+    """
     tournament_ids: set[int] = set()
     page = 1
     while True:
@@ -679,6 +728,7 @@ def fetch_tournament_bundle(
     *,
     is_verbose: bool = False,
 ) -> tuple[Optional[dict[str, Any]], Optional[list[dict[str, Any]]], Optional[str]]:
+    """Fetch tournament meta and results. Returns ``(meta, results, error)``."""
     tournament, error, _ = api_request(
         f"tournaments/{tournament_id}.json",
         is_verbose=is_verbose,
@@ -701,7 +751,13 @@ def fetch_tournament_bundle(
     return tournament, result_items, None
 
 
+# ---------------------------------------------------------------------------
+# Parquet shards and tournaments index
+# ---------------------------------------------------------------------------
+
+
 def _atomic_write_parquet(path: Path, frame: pd.DataFrame) -> None:
+    """Write parquet via temp file replace to avoid truncated files on crash."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     frame.to_parquet(tmp_path, index=False)
@@ -720,6 +776,7 @@ def _write_tournament_tables(
     player_rows: list[dict[str, Any]],
     question_rows: list[dict[str, Any]],
 ) -> None:
+    """Overwrite the three per-tournament shards for one tournament id."""
     _write_shard(
         paths["team_shards"] / f"{tournament_id}.parquet",
         team_rows,
@@ -773,6 +830,7 @@ def _upsert_index_row(
     index: pd.DataFrame,
     row: dict[str, Any],
 ) -> pd.DataFrame:
+    """Replace one tournament row. O(n) copy — known bottleneck under lock."""
     tournament_id = row["tournament_id"]
     if not index.empty and tournament_id in index["tournament_id"].values:
         index = index[index["tournament_id"] != tournament_id]
@@ -827,6 +885,7 @@ def _update_index_row(
     paths: dict[str, Path],
     row: dict[str, Any],
 ) -> None:
+    """Persist one index row immediately (safe on crash, expensive at scale)."""
     with _index_lock:
         index = _load_index_unlocked(paths)
         index = _upsert_index_row(index, row)
@@ -839,6 +898,11 @@ def _merge_tournament_index(
     *,
     resume: bool,
 ) -> pd.DataFrame:
+    """Merge API list rows into the on-disk index.
+
+    Known issue (see task.md): list rows use fetch_status='listed' and currently
+    replace existing ok rows for the same id, which weakens resume/skip.
+    """
     if list_index.empty:
         return existing_index
     if existing_index.empty or not resume:
@@ -904,6 +968,11 @@ def _resolve_tournament_ids_for_download(
     return [], pd.DataFrame(columns=INDEX_COLUMNS), False
 
 
+# ---------------------------------------------------------------------------
+# Download orchestration
+# ---------------------------------------------------------------------------
+
+
 def download_tournament(
     tournament_id: int,
     paths: dict[str, Path],
@@ -911,7 +980,10 @@ def download_tournament(
     is_verbose: bool = False,
     resume: bool = True,
 ) -> str:
-    """Download one tournament and write shard parquet files. Returns status."""
+    """Download one tournament and write shard parquet files.
+
+    Returns status: ``ok``, ``skipped``, ``failed``, or ``results_failed``.
+    """
     fetched_at = _utc_now_iso()
 
     tournament, results, error = fetch_tournament_bundle(
@@ -985,7 +1057,8 @@ def _download_many_tournaments(
     workers: int = DEFAULT_WORKERS,
     progress_desc: str = "Tournaments",
 ) -> dict[str, int]:
-    ids = sorted(set(int(tournament_id) for tournament_id in tournament_ids))
+    """Download many tournaments sequentially or with a small thread pool."""
+    ids = sorted({int(tournament_id) for tournament_id in tournament_ids})
     stats = {"total": len(ids), "ok": 0, "skipped": 0, "failed": 0, "results_failed": 0}
     if not ids:
         return stats
@@ -1046,6 +1119,7 @@ def _download_many_tournaments(
 
 
 def _index_from_list_items(items: list[dict[str, Any]]) -> pd.DataFrame:
+    """Build an index frame from /tournaments list payloads (status=listed)."""
     rows = []
     for item in items:
         meta = flatten_tournament_meta(item)
@@ -1153,7 +1227,12 @@ def select_tournament_ids_for_window(
     window_days: int = DEFAULT_WINDOW_DAYS,
     last_sync_at: Optional[str] = None,
 ) -> set[int]:
-    """Select tournaments to refresh by date_end window and last_edit_date."""
+    """Select tournaments to refresh by date_end window and last_edit_date.
+
+    Includes:
+    - tournaments with ``date_end`` within ``window_days``;
+    - tournaments edited on/after roughly the previous sync day.
+    """
     if index.empty:
         return set()
 
@@ -1188,7 +1267,11 @@ def update_by_window(
     resume: bool = False,
     workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
-    """Refresh recent tournaments and tournaments changed since last sync."""
+    """Refresh recent tournaments and tournaments changed since last sync.
+
+    Default ``resume=False`` forces re-download of the selected window so
+    unsettled synch results are overwritten, not skipped.
+    """
     paths = _ensure_layout(data_dir)
     state = _load_sync_state(paths)
     last_sync_at = state.get("last_success_at")
@@ -1264,7 +1347,11 @@ def download_teams(
     resume: bool = True,
     workers: int = DEFAULT_WORKERS,
 ) -> dict[str, Any]:
-    """Download full tournaments for all tournaments where given teams played."""
+    """Download full tournaments for all events where given teams played.
+
+    Full tournament payloads are intentional: difficulty and relative metrics
+    need all opponents, not only the watched teams.
+    """
     paths = _ensure_layout(data_dir)
     tournament_ids: set[int] = set()
     team_id_list = [int(team_id) for team_id in team_ids]
@@ -1338,11 +1425,17 @@ def retry_failures(
     return stats
 
 
+# ---------------------------------------------------------------------------
+# Compact tables and enrichment
+# ---------------------------------------------------------------------------
+
+
 def _empty_table(columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame({column: pd.Series(dtype="object") for column in columns})
 
 
 def _prepare_frame_for_concat(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Align shard columns/dtypes before concat to avoid pandas dtype clashes."""
     prepared = frame.reindex(columns=columns).copy()
     for column in columns:
         if column not in frame.columns or prepared[column].isna().all():
@@ -1351,6 +1444,10 @@ def _prepare_frame_for_concat(frame: pd.DataFrame, columns: list[str]) -> pd.Dat
 
 
 def _merge_shards(shard_files: list[Path], columns: list[str]) -> pd.DataFrame:
+    """Load all shards into memory and concatenate.
+
+    This is simple but memory-heavy at full history scale; see task.md P2.
+    """
     if not shard_files:
         return _empty_table(columns)
 
@@ -1560,8 +1657,13 @@ def get_sync_stats(data_dir: str | Path) -> dict[str, Any]:
     return stats
 
 
+# ---------------------------------------------------------------------------
+# Self-tests
+# ---------------------------------------------------------------------------
+
+
 def run_self_tests() -> None:
-    """Minimal inline checks for parser helpers."""
+    """Minimal inline checks for parsers, window selection and enrichment."""
     assert parse_iso_date("2025-02-08T11:00:00+00:00") == "2025-02-08"
     assert parse_mask("101X?") == [
         (1, "1", 1),
