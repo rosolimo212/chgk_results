@@ -182,6 +182,47 @@ def run_update(
     return Report(_map(sorted(found), worker, workers))
 
 
+def run_load_days(
+    client: Any,
+    store: Any,
+    *,
+    days: int,
+    write_sql: bool,
+    workers: int,
+    now: str | None = None,
+    today: datetime | None = None,
+    echo: Echo = print,
+) -> Report:
+    """Reload tournaments whose end date falls inside the last ``days`` days.
+
+    Unlike ``update``, this does not add tournaments edited outside the window.
+    Unlike ``load-all``, an unchanged ``last_edit_date`` is fetched again.
+    """
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    inserted_at = now or utc_now()
+    day = (today or datetime.now(timezone.utc)).date()
+    cutoff = (day - timedelta(days=days)).isoformat()
+    try:
+        listed = client.list_tournaments({"dateEnd[after]": cutoff})
+    except ApiError as exc:
+        outcome = Outcome(None, "failed", [str(exc)])
+        echo(_line(outcome))
+        return Report([outcome])
+
+    def worker(tournament_id: int) -> Outcome:
+        return load_tournament(
+            client,
+            store,
+            tournament_id,
+            write_sql=write_sql,
+            inserted_at=inserted_at,
+            echo=echo,
+        )
+
+    return Report(_map(_ids(listed), worker, workers))
+
+
 def run_load_all(
     client: Any,
     store: Any,

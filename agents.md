@@ -13,7 +13,7 @@ The current loader writes Postgres schema `chgk`. The previous parquet pipeline 
 
 ## Pipeline
 
-`chgk_results.py` is the CLI: `load-one`, `update`, `load-all`.
+`chgk_results.py` is the CLI: `load-one`, `update`, `load-days --days N`, `load-all`.
 
 `write_sql` in `config.json` gates `PostgresStore.replace_tournament`. Checks run in both modes.
 
@@ -23,4 +23,4 @@ One tournament is fetched, checked, built, checked again, then replaced inside a
 
 Play date for a synch comes from `GET /tournaments/{id}/requests`, matched by `synchRequest.id`.
 
-Resume for `load-all` reads `chgk.tournament_load` and skips `status = ok` with the same `last_edit_date`.
+`load-days --days N` reloads tournaments with `dateEnd` inside that many days and does not skip unchanged rows. Resume for `load-all` reads `chgk.tournament_load` and skips `status = ok` with the same `last_edit_date`.

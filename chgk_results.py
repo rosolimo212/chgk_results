@@ -2,6 +2,7 @@
 
     python chgk_results.py load-one --id 5022
     python chgk_results.py update
+    python chgk_results.py load-days --days 730
     python chgk_results.py load-all
 """
 
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from client import HttpClient
-from commands import Echo, Report, run_load_all, run_load_one, run_update, summarize
+from commands import Echo, Report, run_load_all, run_load_days, run_load_one, run_update, summarize
 from config_load import Settings, load_settings
 from store import MemoryStore, PostgresStore
 
@@ -26,6 +27,16 @@ def default_config_path() -> Path:
     return root / "config.example.json"
 
 
+def _positive_days(value: str) -> int:
+    try:
+        days = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("число дней должно быть целым") from exc
+    if days < 1:
+        raise argparse.ArgumentTypeError("число дней должно быть не меньше 1")
+    return days
+
+
 def parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Загрузка результатов ЧГК в Postgres")
     parser.add_argument("--config", default=None, help="JSON с write_sql, окном и воркерами")
@@ -33,6 +44,8 @@ def parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
     one = subparsers.add_parser("load-one", help="Один турнир")
     one.add_argument("--id", type=int, required=True)
     subparsers.add_parser("update", help="Окно и турниры, изменённые после прошлой заливки")
+    window = subparsers.add_parser("load-days", help="Перекачать турниры за последние N дней")
+    window.add_argument("--days", type=_positive_days, required=True)
     subparsers.add_parser("load-all", help="Полная перезапись с продолжением после остановки")
     return parser.parse_args(argv)
 
@@ -77,6 +90,16 @@ def main(
             store,
             write_sql=settings.write_sql,
             window_days=settings.window_days,
+            workers=settings.workers,
+            now=now,
+            echo=echo,
+        )
+    elif args.command == "load-days":
+        report = run_load_days(
+            client,
+            store,
+            days=args.days,
+            write_sql=settings.write_sql,
             workers=settings.workers,
             now=now,
             echo=echo,

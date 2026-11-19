@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,7 +16,7 @@ if str(ROOT) not in sys.path:
 
 from build import build_bundle
 from checks import check_bundle, check_response
-from commands import run_load_all, run_load_one, run_update
+from commands import run_load_all, run_load_days, run_load_one, run_update
 from config_load import load_settings
 from chgk_results import main
 from store import MemoryStore, statement_list
@@ -199,13 +200,17 @@ class CommandTests(unittest.TestCase):
         settings = self._settings(False)
         one = run_load_one(client, store, 1, write_sql=settings.write_sql, now=NOW, echo=silence)
         update = run_update(client, store, write_sql=settings.write_sql, window_days=90, workers=1, now=NOW, echo=silence)
+        days = run_load_days(client, store, days=730, write_sql=settings.write_sql, workers=1, now=NOW, echo=silence)
         full = run_load_all(client, store, write_sql=settings.write_sql, workers=1, now=NOW, echo=silence)
         self.assertEqual([item.action for item in one.outcomes], ["checked"])
         self.assertEqual([item.action for item in update.outcomes], ["checked"])
+        self.assertEqual([item.action for item in days.outcomes], ["checked"])
         self.assertEqual([item.action for item in full.outcomes], ["checked"])
         self.assertEqual(one.outcomes[0].bundle.teams, update.outcomes[0].bundle.teams)
+        self.assertEqual(one.outcomes[0].bundle.teams, days.outcomes[0].bundle.teams)
         self.assertEqual(one.outcomes[0].bundle.teams, full.outcomes[0].bundle.teams)
         self.assertEqual(one.outcomes[0].bundle.questions, update.outcomes[0].bundle.questions)
+        self.assertEqual(one.outcomes[0].bundle.questions, days.outcomes[0].bundle.questions)
         self.assertEqual(one.outcomes[0].bundle.tournament, full.outcomes[0].bundle.tournament)
         self.assertEqual(store.writes, [])
 
@@ -214,6 +219,7 @@ class CommandTests(unittest.TestCase):
         for runner in (
             lambda client, store: run_load_one(client, store, 1, write_sql=True, now=NOW, echo=silence),
             lambda client, store: run_update(client, store, write_sql=True, window_days=90, workers=1, now=NOW, echo=silence),
+            lambda client, store: run_load_days(client, store, days=365, write_sql=True, workers=1, now=NOW, echo=silence),
             lambda client, store: run_load_all(client, store, write_sql=True, workers=1, now=NOW, echo=silence),
         ):
             client = FakeClient(tournament, results, requests)
@@ -231,6 +237,7 @@ class CommandTests(unittest.TestCase):
         for starter in (
             lambda client, store: main(["load-one", "--id", "1"], client=client, store=store, settings=self._settings(True), now=NOW, echo=silence),
             lambda client, store: main(["update"], client=client, store=store, settings=self._settings(True), now=NOW, echo=silence),
+            lambda client, store: main(["load-days", "--days", "365"], client=client, store=store, settings=self._settings(True), now=NOW, echo=silence),
             lambda client, store: main(["load-all"], client=client, store=store, settings=self._settings(True), now=NOW, echo=silence),
         ):
             client = FakeClient(tournament, hidden)
@@ -273,7 +280,7 @@ class CommandTests(unittest.TestCase):
         tournament, results, requests = three_team_payload()
         settings = self._settings(False)
         rows = []
-        for argv in (["load-one", "--id", "1"], ["update"], ["load-all"]):
+        for argv in (["load-one", "--id", "1"], ["update"], ["load-days", "--days", "365"], ["load-all"]):
             client = FakeClient(tournament, results, requests)
             store = MemoryStore()
             code = main(argv, client=client, store=store, settings=settings, now=NOW, echo=silence)
@@ -281,7 +288,29 @@ class CommandTests(unittest.TestCase):
             self.assertEqual(store.writes, [])
             report_client = client
             rows.append(report_client.fetched)
-        self.assertEqual(rows, [[1], [1], [1]])
+        self.assertEqual(rows, [[1], [1], [1], [1]])
+
+    def test_load_days_uses_only_the_requested_window_and_refetches(self):
+        tournament, results, requests = three_team_payload()
+        client = FakeClient(tournament, results, requests)
+        store = MemoryStore()
+        store.loaded[1] = ("2020-01-02", "ok")
+        store.success_at = "2026-01-01T00:00:00+00:00"
+        day = datetime(2026, 6, 15, tzinfo=timezone.utc)
+        report = run_load_days(
+            client,
+            store,
+            days=730,
+            write_sql=False,
+            workers=1,
+            now=NOW,
+            today=day,
+            echo=silence,
+        )
+        cutoff = (day.date() - timedelta(days=730)).isoformat()
+        self.assertEqual(client.list_calls, [{"dateEnd[after]": cutoff}])
+        self.assertEqual(client.fetched, [1])
+        self.assertEqual(report.outcomes[0].action, "checked")
 
     def test_fixture_5022_passes_checks(self):
         tournament = json.loads((FIXTURES / "tournament_5022_meta.json").read_text(encoding="utf-8"))

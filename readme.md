@@ -30,11 +30,13 @@ database_url: postgresql://loader@127.0.0.1:5432/chgk
 ```bash
 python3 chgk_results.py load-one --id 5022
 python3 chgk_results.py update
+python3 chgk_results.py load-days --days 730
 python3 chgk_results.py load-all
 ```
 
 - `load-one` — один турнир.
-- `update` — турниры с `dateEnd` внутри окна и турниры с `lastEditDate` новее последней успешной заливки.
+- `update` — турниры с `dateEnd` внутри окна из конфига и турниры с `lastEditDate` новее последней успешной заливки.
+- `load-days --days N` — заново скачать турниры, которые закончились за последние N дней. Год или два, без всей истории. Уже залитые в этом окне качаются снова.
 - `load-all` — все турниры. Уже залитые с тем же `last_edit_date` пропускаются, после остановки запуск продолжается.
 
 На виртуальной машине cron раз в сутки вызывает `update`.
