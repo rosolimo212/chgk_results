@@ -1,0 +1,21 @@
+{
+  "idtown": 197,
+  "type": {"id": 2, "name": "Обычный", "shortName": "Т"},
+  "id": 5022,
+  "name": "БЛИК-22",
+  "longName": "Фестиваль в честь дня рождения БЛИК: БЛИК-22",
+  "lastEditDate": "2018-05-26T21:00:00+00:00",
+  "dateStart": "2018-06-02T11:00:00+00:00",
+  "dateEnd": "2018-06-03T13:00:00+00:00",
+  "paymentCategories": [],
+  "idseason": 51,
+  "orgcommittee": [{"id": 4715, "name": "Сергей", "patronymic": "Михайлович", "surname": "Буян"}],
+  "languages": [{"name": "Русский", "id": "ru"}],
+  "editors": [{"id": 11260, "name": "Евгений", "patronymic": "Валерьевич", "surname": "Зайцев"}],
+  "gameJury": [],
+  "appealJury": [],
+  "trueDL": 4.3,
+  "ratingSystems": ["mak"],
+  "regulationsUrl": "",
+  "questionQty": {"1": 10, "2": 10, "3": 10}
+}

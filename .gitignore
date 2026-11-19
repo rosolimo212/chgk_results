@@ -1,0 +1,15 @@
+# Secrets. Keep a local copy and copy it to the VM by hand.
+*.yaml
+*.yml
+
+# Datasets
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.feather
+*.pickle
+*.pkl
+*.sqlite
+*.db

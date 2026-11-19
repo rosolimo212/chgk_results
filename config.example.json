@@ -1,0 +1,8 @@
+{
+  "write_sql": false,
+  "window_days": 90,
+  "workers": 2,
+  "request_delay_seconds": 0.12,
+  "items_per_page": 500,
+  "api_base": "https://api.rating.chgk.info"
+}
