@@ -353,6 +353,31 @@ class SchemaTests(unittest.TestCase):
         self.assertLess(validate_at, delete_at)
         self.assertIn("create temp table", statements[0])
 
+    def test_prod_config_writes_and_runs_on_thursday_morning_utc(self):
+        prod = json.loads((ROOT / "config.prod.json").read_text(encoding="utf-8"))
+        self.assertTrue(prod["write_sql"])
+        self.assertEqual(prod["window_days"], 90)
+        cron = (ROOT / "deploy" / "chgk-results.cron").read_text(encoding="utf-8")
+        self.assertIn("CRON_TZ=UTC", cron)
+        self.assertIn("0 5 * * 4", cron)
+        self.assertIn("chgk_results.py update", cron)
+        self.assertIn("/root/python/chgk_results/.venv/bin/python", cron)
+        self.assertNotIn("/root/python/.venv/bin/python", cron)
+        roles = (ROOT / "roles.sql").read_text(encoding="utf-8").lower()
+        self.assertIn("grant select on all tables in schema chgk to chgk_reader", roles)
+        self.assertIn("grant connect, temp on database chgk to chgk_owner", roles)
+
+    def test_prod_instructions_use_postgres_16_not_the_old_cluster(self):
+        readme = (ROOT / "readme.md").read_text(encoding="utf-8")
+        self.assertIn("postgresql://chgk_owner:ПАРОЛЬ@127.0.0.1:5434/chgk", readme)
+        self.assertIn("postgresql://chgk_owner:ПАРОЛЬ_OWNER@127.0.0.1:5434/chgk", readme)
+        self.assertIn("postgresql://chgk_reader:ПАРОЛЬ_READER@45.132.18.2:5434/chgk?sslmode=require", readme)
+        self.assertIn("sudo -u postgres psql -p 5434 -c \"CREATE DATABASE chgk OWNER chgk_owner;\"", readme)
+        self.assertIn("hostssl chgk chgk_reader 0.0.0.0/0 md5", readme)
+        self.assertNotIn(":5432/", readme)
+        self.assertNotIn("psql -c \"CREATE DATABASE", readme)
+        self.assertIn("Не останавливать", readme)
+
     def test_example_config_disables_sql_and_requires_a_url_to_enable_it(self):
         settings = load_settings(ROOT / "config.example.json")
         self.assertFalse(settings.write_sql)

@@ -15,7 +15,7 @@ The current loader writes Postgres schema `chgk`. The previous parquet pipeline 
 
 `chgk_results.py` is the CLI: `load-one`, `update`, `load-days --days N`, `load-all`.
 
-`write_sql` in `config.json` gates `PostgresStore.replace_tournament`. Checks run in both modes.
+`write_sql` in `config.json` gates `PostgresStore.replace_tournament`. Local default is `config.example.json` (`write_sql` false). Production file is `config.prod.json`. The loader connects as `chgk_owner` to PostgreSQL 16 on `127.0.0.1:5434`. Port 5432 is the leftover PostgreSQL 12 cluster; do not create `chgk` there and do not stop that cluster. External clients use `chgk_reader` (`SELECT` only, `roles.sql`) at `45.132.18.2:5434` with `sslmode=require`. Checks run in both modes.
 
 One tournament is fetched, checked, built, checked again, then replaced inside a single transaction: temp tables, count checks, delete, insert. A hidden payload does not replace a tournament that already has a main-packet mask.
 

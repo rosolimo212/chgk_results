@@ -1,3 +1,6 @@
+# Project venv on the VM. The shared /root/python/.venv stays untouched.
+.venv/
+
 # Secrets. Keep a local copy and copy it to the VM by hand.
 *.yaml
 *.yml

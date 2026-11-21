@@ -1,0 +1,4 @@
+# Thursday 05:00:00 UTC. Cron starts at second 0.
+# Add these lines with crontab -e. Installing this file via `crontab file` replaces every existing job.
+CRON_TZ=UTC
+0 5 * * 4 /root/python/chgk_results/.venv/bin/python /root/python/chgk_results/chgk_results.py update >> /var/log/chgk_results.log 2>&1
