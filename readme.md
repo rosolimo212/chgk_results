@@ -23,13 +23,21 @@ database_url: postgresql://chgk_owner:ПАРОЛЬ@127.0.0.1:5434/chgk
 
 ## Команды
 
-Из папки `chgk_results`:
+Из папки `chgk_results`. Своё окружение в `.venv`, общий `/root/python/.venv` не трогаем:
 
 ```bash
-python3 chgk_results.py load-one --id 5022
-python3 chgk_results.py update
-python3 chgk_results.py load-days --days 730
-python3 chgk_results.py load-all
+deactivate 2>/dev/null || true
+rm -rf .venv
+python3 -m venv .venv
+# или явно 3.10: ~/.pyenv/versions/3.10.12/bin/python -m venv .venv
+source .venv/bin/activate
+pip install -U pip setuptools wheel
+pip install -r requirements.txt
+
+python chgk_results.py load-one --id 5022
+python chgk_results.py update
+python chgk_results.py load-days --days 730
+python chgk_results.py load-all
 ```
 
 - `load-one` — один турнир.
@@ -57,15 +65,19 @@ Postgres на машине три кластера. База `chgk` создаё
 scp /home/roman/python/chgk/chgk_results/secrets.yaml root@45.132.18.2:/root/python/chgk_results/secrets.yaml
 ```
 
-2. На машине обновите код и соберите отдельное окружение системным Python 3.12. `requests` и `psycopg[binary]` из `requirements.txt` ставятся и на 3.10, и на 3.12.
+2. На машине обновите код и соберите отдельное окружение в каталоге репозитория. `rm -rf .venv` ниже удаляет только `/root/python/chgk_results/.venv`. Общий `/root/python/.venv` не удалять. На этой машине `python3` — системный 3.12.3; если нужно 3.10, используйте закомментированную строку с pyenv.
 
 ```bash
 ssh root@45.132.18.2
 cd /root/python/chgk_results
 git pull
-/usr/bin/python3 -V
-/usr/bin/python3 -m venv /root/python/chgk_results/.venv
-/root/python/chgk_results/.venv/bin/pip install -r requirements.txt
+deactivate 2>/dev/null || true
+rm -rf .venv
+python3 -m venv .venv
+# или явно 3.10: ~/.pyenv/versions/3.10.12/bin/python -m venv .venv
+source .venv/bin/activate
+pip install -U pip setuptools wheel
+pip install -r requirements.txt
 ```
 
 3. Проверьте кластер 16, ничего в нём не меняя.

@@ -13,7 +13,7 @@ The current loader writes Postgres schema `chgk`. The previous parquet pipeline 
 
 ## Pipeline
 
-`chgk_results.py` is the CLI: `load-one`, `update`, `load-days --days N`, `load-all`.
+`chgk_results.py` is the CLI: `load-one`, `update`, `load-days --days N`, `load-all`. Dependencies live in a project-local `.venv` (`python3 -m venv .venv` from the repo directory, or pyenv 3.10.12). The shared `/root/python/.venv` is not used and is not removed.
 
 `write_sql` in `config.json` gates `PostgresStore.replace_tournament`. Local default is `config.example.json` (`write_sql` false). Production file is `config.prod.json`. The loader connects as `chgk_owner` to PostgreSQL 16 on `127.0.0.1:5434`. Port 5432 is the leftover PostgreSQL 12 cluster; do not create `chgk` there and do not stop that cluster. External clients use `chgk_reader` (`SELECT` only, `roles.sql`) at `45.132.18.2:5434` with `sslmode=require`. Checks run in both modes.
 

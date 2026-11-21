@@ -377,6 +377,12 @@ class SchemaTests(unittest.TestCase):
         self.assertNotIn(":5432/", readme)
         self.assertNotIn("psql -c \"CREATE DATABASE", readme)
         self.assertIn("Не останавливать", readme)
+        self.assertIn("rm -rf .venv", readme)
+        self.assertIn("python3 -m venv .venv", readme)
+        self.assertIn("~/.pyenv/versions/3.10.12/bin/python -m venv .venv", readme)
+        self.assertIn("pip install -U pip setuptools wheel", readme)
+        self.assertIn("pip install -r requirements.txt", readme)
+        self.assertFalse((ROOT / "scripts" / "setup_venv.sh").exists())
 
     def test_example_config_disables_sql_and_requires_a_url_to_enable_it(self):
         settings = load_settings(ROOT / "config.example.json")
