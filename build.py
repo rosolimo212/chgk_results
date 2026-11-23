@@ -175,7 +175,9 @@ def _request_index(requests: list[dict[str, Any]] | None) -> dict[int, dict[str,
 
 
 def _played(request: dict[str, Any] | None, tournament: dict[str, Any], is_synch: bool) -> tuple[Any, Any, Any, Optional[str]]:
-    if is_synch and request:
+    if is_synch:
+        if not request:
+            return None, None, None, None
         venue = request.get("venue") if isinstance(request.get("venue"), dict) else {}
         town = venue.get("town") if isinstance(venue.get("town"), dict) else {}
         return venue.get("id"), venue.get("name"), town.get("name"), date_only(request.get("dateStart"))
@@ -183,10 +185,10 @@ def _played(request: dict[str, Any] | None, tournament: dict[str, Any], is_synch
     return None, None, town.get("name"), date_only(tournament.get("dateStart"))
 
 
-def _tiebreak_parts(mask: str | None) -> list[str]:
-    if not mask:
+def _tiebreak_parts(mask: Any) -> list[str]:
+    if not isinstance(mask, str) or not mask:
         return []
-    return [part for part in str(mask).split(" ") if part]
+    return [part for part in mask.split(" ") if part and all(char in "01" for char in part)]
 
 
 def compute_metrics(questions: list[dict[str, Any]], active: list[int]) -> dict[int, dict[str, Any]]:
@@ -321,20 +323,31 @@ def build_bundle(
     tournament_id = tournament_row["tournament_id"]
 
     for result in results:
-        team = result.get("team") or {}
-        current = result.get("current") or {}
-        rating = result.get("rating") or {}
-        if not isinstance(rating, dict):
-            rating = {}
+        if not isinstance(result, dict):
+            continue
+        team = result.get("team") if isinstance(result.get("team"), dict) else {}
+        if team.get("id") is None:
+            continue
+        current = result.get("current") if isinstance(result.get("current"), dict) else {}
+        rating = result.get("rating") if isinstance(result.get("rating"), dict) else {}
         team_id = int(team["id"])
         request = None
         if is_synch:
-            request = request_by_id.get(int((result.get("synchRequest") or {})["id"]))
+            request_id = (result.get("synchRequest") or {}).get("id") if isinstance(result.get("synchRequest"), dict) else None
+            if request_id is not None:
+                request = request_by_id.get(int(request_id))
         venue_id, venue_name, town_name, played = _played(request, tournament, is_synch)
-        members = result.get("teamMembers") or []
-        player_ids: list[int] = []
+        members = result.get("teamMembers")
+        player_ids: list[int] | None
+        if not isinstance(members, list):
+            player_ids = None
+            members = []
+        else:
+            player_ids = []
         for member in members:
-            player = member.get("player") or {}
+            if not isinstance(member, dict):
+                continue
+            player = member.get("player") if isinstance(member.get("player"), dict) else {}
             if player.get("id") is None:
                 continue
             player_id = int(player["id"])
@@ -378,21 +391,22 @@ def build_bundle(
                 "potential": None,
                 "c_star": None,
                 "player_ids": player_ids,
-                "flags": flags if isinstance(flags, list) else [],
+                "flags": flags if isinstance(flags, list) else None,
                 "inserted_at": inserted_at,
             }
         )
         mask = result.get("mask")
         if isinstance(mask, str):
             for index, char in enumerate(mask, start=1):
+                known = char in "01X?"
                 question_rows.append(
                     {
                         "tournament_id": tournament_id,
                         "team_id": team_id,
                         "tiebreak_round": MAIN_ROUND,
                         "question_number": index,
-                        "mask_char": char,
-                        "taken": 1 if char == "1" else 0,
+                        "mask_char": char if known else None,
+                        "taken": (1 if char == "1" else 0) if known else None,
                         "difficulty": None,
                         "question_potential": None,
                         "inserted_at": inserted_at,

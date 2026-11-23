@@ -156,24 +156,47 @@ class MetricTests(unittest.TestCase):
 
 
 class ResponseCheckTests(unittest.TestCase):
-    def test_missing_flags_and_bad_tiebreaker_and_unmatched_request(self):
-        tournament, results, _requests = three_team_payload()
-        broken = dict(results[0])
-        del broken["flags"]
-        self.assertTrue(check_response(tournament, [broken], None))
-
-        bad_tie = team_result(1, "10", tiebreaker="10 2")
-        self.assertTrue(any("tiebreaker" in error for error in check_response(tournament, [bad_tie], None)))
-
+    def test_missing_optional_fields_stay_null_and_the_tournament_is_kept(self):
         synch = tournament_shell(type={"id": 3, "name": "Синхрон"})
-        row = team_result(7, "10", synchRequest={"id": 99, "tournamentId": 1, "venue": {"id": 1, "name": "Зал"}})
-        self.assertTrue(check_response(synch, [row], [{"id": 5, "dateStart": "2020-01-03T10:00:00+00:00"}]))
-        ok_requests = [{"id": 99, "dateStart": "2020-01-03T10:00:00+00:00", "venue": {"id": 4, "name": "Зал", "town": {"name": "Рига"}}}]
-        self.assertEqual(check_response(synch, [row], ok_requests), [])
-        bundle = build_bundle(synch, [row], ok_requests, inserted_at=NOW)
-        self.assertEqual(bundle.teams[0]["team_played_date"], "2020-01-03")
-        self.assertEqual(bundle.teams[0]["town_name"], "Рига")
-        self.assertTrue(bundle.tournament["is_synch"])
+        dated = team_result(1, "10", synchRequest={"id": 99, "tournamentId": 1, "venue": {"id": 1, "name": "Зал"}})
+        dated["teamMembers"] = [
+            {"player": {"id": 11}, "flag": None, "rating": None},
+            {"player": {"name": "Без id"}},
+        ]
+        undated = team_result(2, "1Z", tiebreaker="10 2", synchRequest=None)
+        undated["teamMembers"] = None
+        undated["flags"] = None
+        requests = [{"id": 99, "dateStart": "2020-01-03T10:00:00+00:00", "venue": {"id": 4, "name": "Зал", "town": {"name": "Рига"}}}]
+        payload = [dated, undated, "не объект", {"position": 1}]
+        self.assertEqual(check_response(synch, payload, requests), [])
+        bundle = build_bundle(synch, payload, requests, inserted_at=NOW)
+        self.assertEqual(check_bundle(bundle), [])
+        self.assertEqual(bundle.tournament["tournament_id"], 1)
+        by_team = {row["team_id"]: row for row in bundle.teams}
+        self.assertEqual(set(by_team), {1, 2})
+        self.assertEqual(by_team[1]["team_played_date"], "2020-01-03")
+        self.assertEqual(by_team[1]["town_name"], "Рига")
+        self.assertEqual(by_team[1]["player_ids"], [11])
+        self.assertIsNone(bundle.players[0]["player_surname"])
+        self.assertIsNone(by_team[2]["team_played_date"])
+        self.assertIsNone(by_team[2]["venue_id"])
+        self.assertIsNone(by_team[2]["flags"])
+        self.assertIsNone(by_team[2]["player_ids"])
+        self.assertFalse(any(row["team_id"] == 2 for row in bundle.players))
+        undated_questions = [row for row in bundle.questions if row["team_id"] == 2 and row["tiebreak_round"] == 0]
+        self.assertEqual([row["taken"] for row in undated_questions], [1, None])
+        self.assertIsNone(undated_questions[1]["mask_char"])
+        self.assertEqual(
+            [row["mask_char"] for row in bundle.questions if row["team_id"] == 2 and row["tiebreak_round"] == 1],
+            ["1", "0"],
+        )
+
+    def test_duplicate_team_still_blocks_the_tournament(self):
+        tournament, results, _requests = three_team_payload()
+        results.append(team_result(1, "00"))
+        self.assertTrue(any("duplicate team.id" in error for error in check_response(tournament, results, None)))
+        self.assertTrue(check_response({}, results, None))
+        self.assertTrue(check_response(tournament, {"id": 1}, None))
 
 
 class CommandTests(unittest.TestCase):
@@ -249,7 +272,7 @@ class CommandTests(unittest.TestCase):
 
     def test_failed_check_blocks_write_for_load_one(self):
         tournament, results, requests = three_team_payload()
-        del results[0]["flags"]
+        results.append(team_result(1, "00"))
         client = FakeClient(tournament, results, requests)
         store = MemoryStore()
         report = run_load_one(client, store, 1, write_sql=True, now=NOW, echo=silence)
